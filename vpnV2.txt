@@ -1,0 +1,179 @@
+﻿timedatectl set-timezone America/Los_Angeles
+
+domainname=myvm.ddns.net
+
+#设置动态dns
+yum install -y noip
+noip2 -C
+systemctl enable noip;systemctl restart noip
+#记得每30天到noip.com续期
+
+#用LET’S ENCRYPT制作https证书
+yum -y install yum-utils httpd mod_ssl certbot-apache
+yum-config-manager --enable rhui-REGION-rhel-server-extras rhui-REGION-rhel-server-optional
+systemctl enable httpd; systemctl start httpd
+
+cp /etc/httpd/conf.d/ssl.conf /etc/httpd/conf.d/ssl.conf.installed
+sed 's/^SSLProtocol/# SSLProtocol/' < /etc/httpd/conf.d/ssl.conf.installed > /etc/httpd/conf.d/ssl.conf.tmp
+sed 's/^SSLCipherSuite/# SSLCipherSuite/' < /etc/httpd/conf.d/ssl.conf.tmp > /etc/httpd/conf.d/ssl.conf
+rm -f /etc/httpd/conf.d/ssl.conf.tmp
+
+cat >> /etc/httpd/conf.d/ssl.conf <<-EOF
+
+# Begin copied text
+# from https://cipherli.st/
+# and https://raymii.org/s/tutorials/Strong_SSL_Security_On_Apache2.html
+
+SSLCipherSuite EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH
+SSLProtocol All -SSLv2 -SSLv3
+SSLHonorCipherOrder On
+# Disable preloading HSTS for now.  You can use the commented out header line that includes
+# the "preload" directive if you understand the implications.
+#Header always set Strict-Transport-Security "max-age=63072000; includeSubdomains; preload"
+Header always set Strict-Transport-Security "max-age=63072000; includeSubdomains"
+Header always set X-Frame-Options DENY
+Header always set X-Content-Type-Options nosniff
+# Requires Apache >= 2.4
+SSLCompression off
+SSLUseStapling on
+SSLStaplingCache "shmcb:logs/stapling-cache(150000)"
+# Requires Apache >= 2.4.11
+# SSLSessionTickets Off
+
+EOF
+
+apachectl configtest
+systemctl restart httpd
+crontab -e
+0 4 1 * * /bin/certbot renew >> /var/log/le-renew.log 2>&1
+
+#等待
+certbot --apache -d $domainname
+
+
+#检查网站
+#https://www.ssllabs.com/ssltest/analyze.html?d=jp01aws.ddns.net
+
+
+
+
+#安装strongswan
+yum -y install pam-devel openssl-devel make gcc curl wget git strongswan
+
+ln -s /etc/letsencrypt/live/$domainname/fullchain.pem /etc/strongswan/ipsec.d/certs/fullchain.pem
+ln -s /etc/letsencrypt/live/$domainname/privkey.pem /etc/strongswan/ipsec.d/private/privkey.pem
+ln -s /etc/letsencrypt/live/$domainname/chain.pem /etc/strongswan/ipsec.d/cacerts/chain.pem
+
+cp /etc/strongswan/ipsec.conf /etc/strongswan/ipsec.conf.installed
+
+cat > /etc/strongswan/ipsec.conf <<-EOF
+
+config setup
+    uniqueids=no
+    charondebug = ike 3, cfg 3
+
+conn %default
+    dpdaction=clear
+    dpddelay=35s
+    dpdtimeout=2000s
+
+    keyexchange=ikev2
+    auto=add
+    rekey=no
+    reauth=no
+    fragmentation=yes
+    compress=yes
+
+    ### left - local (server) side
+    # filename of certificate chain located in /etc/strongswan/ipsec.d/certs/
+    leftcert=fullchain.pem
+    leftsendcert=always
+    leftsubnet=0.0.0.0/0,::/0
+
+    ### right - remote (client) side
+    eap_identity=%identity
+    rightsourceip=10.1.1.0/24,2a00:1450:400c:c05::/112
+    rightdns=8.8.8.8,2001:4860:4860::8888
+
+conn ikev2-mschapv2
+    rightauth=eap-mschapv2
+
+conn ikev2-mschapv2-apple
+    rightauth=eap-mschapv2
+    leftid=$domainname
+
+EOF
+
+cp /etc/strongswan/ipsec.secrets /etc/strongswan/ipsec.secrets.installed
+cat >> /etc/strongswan/ipsec.secrets  <<-EOF
+: RSA  privkey.pem    #使用证书验证时的服务器端私钥
+: PSK "yAtSsZ7TKh48Cqnw"    #使用预设加密密钥, 越长越好
+: XAUTH "yAtSsZ7TKh48Cqnw"    #使用XAUTH预设加密密钥, 越长越好
+vpnuser : EAP "4NJfdkbpSBMLpksD"    #验证的账户和密码，如果配置了RADIUS ，账户密码无法进行有效验证
+vpnuser1 : XAUTH "4NJfdkbpSBMLpksD"
+
+EOF
+
+cp /etc/sysctl.conf /etc/sysctl.conf.installed
+cat >> /etc/sysctl.conf  <<-EOF
+net.ipv4.ip_forward = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+
+EOF
+
+sysctl -p
+
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+cp /etc/strongswan/strongswan.conf /etc/strongswan/strongswan.conf.installed
+
+cat > /etc/strongswan/strongswan.conf <<-EOF
+charon {
+    load_modular = yes 
+    filelog {
+        /var/log/charon.log {
+            time_format = %b %e %T
+            ike_name = yes 
+            append = no
+            default = 2 
+            flush_line = yes 
+        }   
+        stderr {
+            ike = 2 
+            knl = 3 
+        }                                                                                                                                                            
+    }   
+    syslog {
+        identifier = charon-custom
+        daemon {
+        }   
+        auth {
+            default = -1
+            ike = 0 
+        }   
+    }                                                                                                                                                
+    plugins {
+        include strongswan.d/charon/*.conf
+    }   
+}
+include strongswan.d/*.conf
+
+EOF
+
+
+#add firewall ports
+firewall-cmd --add-port=500/tcp --permanent
+firewall-cmd --add-port=500/udp --permanent
+firewall-cmd --add-port=4500/tcp --permanent
+firewall-cmd --add-port=4500/udp --permanent
+firewall-cmd --add-masquerade --permanent
+firewall-cmd --reload
+
+
+systemctl enable strongswan; systemctl restart strongswan
+
+strongswan listcerts
+
+# 用户端设置教程gif
+http://blog.kompaz.win/2017/01/29/IKEv2%20Manual%20v2/
