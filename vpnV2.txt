@@ -1,14 +1,15 @@
-﻿timedatectl set-timezone America/Los_Angeles
+# This is a memo of how I set up a IKEv2 VPN servers
 
+timedatectl set-timezone America/Los_Angeles
 domainname=myvm.ddns.net
 
-#设置动态dns
+# set up ddns
 yum install -y noip
 noip2 -C
 systemctl enable noip;systemctl restart noip
-#记得每30天到noip.com续期
 
-#用LET’S ENCRYPT制作https证书
+
+# use LET’S ENCRYPT to create a certificate and secure my connection
 yum -y install yum-utils httpd mod_ssl certbot-apache
 yum-config-manager --enable rhui-REGION-rhel-server-extras rhui-REGION-rhel-server-optional
 systemctl enable httpd; systemctl start httpd
@@ -47,17 +48,17 @@ systemctl restart httpd
 crontab -e
 0 4 1 * * /bin/certbot renew >> /var/log/le-renew.log 2>&1
 
-#等待
+# update domain name
 certbot --apache -d $domainname
 
 
-#检查网站
+# check ssl status
 #https://www.ssllabs.com/ssltest/analyze.html?d=jp01aws.ddns.net
 
 
 
 
-#安装strongswan
+# install strongswan
 yum -y install pam-devel openssl-devel make gcc curl wget git strongswan
 
 ln -s /etc/letsencrypt/live/$domainname/fullchain.pem /etc/strongswan/ipsec.d/certs/fullchain.pem
@@ -106,11 +107,10 @@ EOF
 
 cp /etc/strongswan/ipsec.secrets /etc/strongswan/ipsec.secrets.installed
 cat >> /etc/strongswan/ipsec.secrets  <<-EOF
-: RSA  privkey.pem    #使用证书验证时的服务器端私钥
-: PSK "yAtSsZ7TKh48Cqnw"    #使用预设加密密钥, 越长越好
-: XAUTH "yAtSsZ7TKh48Cqnw"    #使用XAUTH预设加密密钥, 越长越好
-vpnuser : EAP "4NJfdkbpSBMLpksD"    #验证的账户和密码，如果配置了RADIUS ，账户密码无法进行有效验证
-vpnuser1 : XAUTH "4NJfdkbpSBMLpksD"
+: RSA  privkey.pem    # private key
+: PSK "yAtSsZ7TKh48Cqnw"    # PSK shared key
+: XAUTH "yAtSsZ7TKh48Cqnw"    # XAUTH pre shared key
+vpnuser : EAP "4NJfdkbpSBMLpksD"    # set user account name and password
 
 EOF
 
@@ -175,5 +175,5 @@ systemctl enable strongswan; systemctl restart strongswan
 
 strongswan listcerts
 
-# 用户端设置教程gif
+# how to set up a client
 http://blog.kompaz.win/2017/01/29/IKEv2%20Manual%20v2/
